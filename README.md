@@ -264,6 +264,42 @@ python -m pytest -q -p no:cacheprovider
 Các kiểm thử không xác nhận được phiên Facebook, Google Sheets, OpenAI hoặc
 Odoo thật vì các dịch vụ đó cần credential riêng.
 
+## GitHub: các lệnh commit cơ bản
+
+Repository chính: <https://github.com/TanPhat129/social-data-collector>
+
+Kiểm tra thay đổi trước khi commit:
+
+```powershell
+git status
+git diff
+```
+
+Chạy test, thêm các file đã chọn và tạo commit:
+
+```powershell
+python -m pytest -q -p no:cacheprovider
+git add README.md app/ tests/
+git commit -m "Mô tả ngắn gọn thay đổi"
+```
+
+Đẩy commit lên nhánh `main`:
+
+```powershell
+git push origin main
+```
+Lưu ý không tự push code vào nhánh main, hãy tạo một branch riêng rồi push code 
+Trước khi bắt đầu một thay đổi mới, lấy cập nhật mới nhất để tránh xung đột:
+
+```powershell
+git pull --rebase origin main
+```
+
+Để thêm toàn bộ thay đổi mã nguồn đã xem xét, có thể dùng `git add -A`, sau đó
+chạy lại `git status` trước khi commit. Tuyệt đối không dùng `git add -f` cho
+`.env`, `.secrets/`, `data/`, `logs/`, service-account key hoặc file export
+lead; các file này đã được `.gitignore` loại trừ.
+
 ## Checklist triển khai
 
 | Hạng mục | Hiện trạng | Việc cần làm trước production |
