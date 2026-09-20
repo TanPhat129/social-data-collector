@@ -288,7 +288,7 @@ git commit -m "Mô tả ngắn gọn thay đổi"
 ```powershell
 git push origin main
 ```
-### $\color{red}{\text{Lưu ý không tự push code vào nhánh main, hãy tạo một branch riêng rồi push code để doulecheck.}}$ Trước khi bắt đầu một thay đổi mới, lấy cập nhật mới nhất để tránh xung đột:
+### $\color{red}{\text{Lưu ý không tự push code vào nhánh main, hãy tạo một branch riêng rồi push code để doublecheck.}}$ Trước khi bắt đầu một thay đổi mới, lấy cập nhật mới nhất để tránh xung đột:
 
 ```powershell
 git pull --rebase origin main
