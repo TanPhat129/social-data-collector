@@ -1,0 +1,41 @@
+# Staging sources for the Facebook browser connector.
+# Do not store passwords, 2FA secrets, cookies, or access tokens here.
+defaults:
+  platform: facebook
+  enabled: true
+  collection_interval_minutes: 30
+  allowed_account_uids:
+    - "100072588106800"
+
+sources:
+  - id: fb_group_615753630041704
+    name: "Facebook Group 615753630041704"
+    source_url: "https://www.facebook.com/groups/615753630041704"
+
+  - id: fb_group_giasudaykemtainhauytin
+    name: "Gia sư dạy kèm tại nhà uy tín"
+    source_url: "https://www.facebook.com/groups/giasudaykemtainhauytin"
+
+  - id: fb_group_giasudaykemthanglong
+    name: "Gia sư dạy kèm Thăng Long"
+    source_url: "https://www.facebook.com/groups/giasudaykemthanglong"
+
+  - id: fb_group_timgiasumienphihn
+    name: "Tìm gia sư miễn phí Hà Nội"
+    source_url: "https://www.facebook.com/groups/timgiasumienphihn"
+
+  - id: fb_group_trungtamgiasuquan9
+    name: "Trung tâm gia sư Quận 9"
+    source_url: "https://www.facebook.com/groups/trungtamgiasuquan9"
+
+  - id: fb_group_giaoviengiasutrogiang
+    name: "Giáo viên, gia sư, trợ giảng"
+    source_url: "https://www.facebook.com/groups/giaoviengiasutrogiang"
+
+  - id: fb_group_1698894063877876
+    name: "Facebook Group 1698894063877876"
+    source_url: "https://www.facebook.com/groups/1698894063877876"
+
+  - id: fb_group_2039048736388431
+    name: "Facebook Group 2039048736388431"
+    source_url: "https://www.facebook.com/groups/2039048736388431"

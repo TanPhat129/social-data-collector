@@ -1,0 +1,12 @@
+.env
+.secrets/
+.venv/
+__pycache__/
+*.py[cod]
+data/
+logs/
+*.db
+service-account*.json
+secrets/
+*.json
+/output*.xlsx
