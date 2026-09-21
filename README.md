@@ -30,8 +30,8 @@ Odoo thay cho YAML.
 - Bộ lọc deterministic xử lý các cụm như `cần/tìm gia sư`, `cần tìm gs`,
   `tìm giáo viên`; có thể thay bằng OpenAI qua `AI_PROVIDER=openai`.
 - SQLite chỉ đánh dấu bài đã xử lý **sau khi** writer nhận batch lead.
-- Google Sheets ghi theo 13 cột: `STT, Group, Subject, Platform, Grade,
-  Location, Mode, Budget, Phone, Content, URL, Posted At, Collected At`.
+- Google Sheets ghi theo 14 cột: `STT, Group, Subject, Platform, Grade,
+  Location, Mode, Budget, Phone, Content, URL, Author URL, Posted At, Collected At`.
   `STT` được tạo tự động bằng công thức Sheets.
 - Facebook thay đổi DOM thường xuyên. Browser Connector hiện chỉ lấy phần nội
   dung bài đăng khi tìm được card/post-message phù hợp; hãy luôn chạy
@@ -147,13 +147,33 @@ Chia sẻ spreadsheet cho email của service account với quyền Editor. Shee
 tiên phải có hàng tiêu đề đúng thứ tự sau:
 
 ```text
-STT | Group | Subject | Platform | Grade | Location | Mode | Budget | Phone | Content | URL | Posted At | Collected At
+STT | Group | Subject | Platform | Grade | Location | Mode | Budget | Phone | Content | URL | Author URL | Posted At | Collected At
 ```
 
 Writer tìm dòng đầu tiên trống ở các cột `Group` đến `Collected At`; vì vậy
 format hoặc công thức STT còn sót lại không làm lead mới bị ghi quá xa phía
 dưới. Mỗi dòng mới đặt `=ROW()-1` ở cột STT. Nếu thiếu cấu hình Google Sheets,
 lead chỉ được log là `accepted locally` và **không** được gửi lên Sheet.
+
+`Posted At` lấy từ metadata thời gian của Facebook khi DOM/API cung cấp; `Author
+URL` chỉ được ghi khi collector xác định được link profile của người tạo post.
+Hai trường có thể để trống nếu Facebook không công khai metadata đó hoặc DOM
+không đủ tin cậy, thay vì lấy nhầm link của comment.
+Với post trong group, Facebook có thể chỉ cung cấp URL thành viên dạng
+`/groups/<group-id>/user/<uid>/`; Browser Connector mở URL này trong tab phụ để
+lấy URL profile cuối cùng, hoặc giữ URL thành viên nếu Facebook không redirect.
+Khi Facebook chỉ hiện thời gian tương đối như `21 giờ`, Browser Connector quy
+đổi thành `Collected At - 21 giờ`; đây là thời gian ước lượng tại lúc crawl.
+Khi hover nhãn thời gian trả về tooltip ngày–giờ đầy đủ, tooltip đó được ưu
+tiên để ghi `Posted At` chính xác.
+Timestamp được xuất theo mẫu `YYYY-MM-DD HH:MM:SS` (ví dụ
+`2026-09-21 14:08:10`).
+
+`URL` bài viết là trường **bắt buộc**: lead thiếu permalink post sẽ bị validator
+loại và không ghi Google Sheets. `Author URL` là trường tùy chọn; để trống là
+hợp lệ đối với post ẩn danh hoặc khi Facebook không cung cấp link người đăng.
+Với post ẩn danh, connector nhận diện nhãn `Người tham gia ẩn danh` ở header và
+luôn để trống `Author URL`; link của comment không bao giờ được dùng thay thế.
 
 ## AI, Graph API và Odoo (tùy chọn)
 
@@ -306,7 +326,7 @@ lead; các file này đã được `.gitignore` loại trừ.
 | Môi trường và biến cấu hình | Có `.env.example` cho Odoo, Google Sheets, Facebook, OpenAI, SQLite và scheduler. | Tạo `.env` riêng từ mẫu, điền credential thật và không commit file này. |
 | Database local | `ProcessedPostStore` tự tạo bảng `processed_posts` và index khi khởi động. Không có migration script hay `models.py` dùng cho SQLite. | Sao lưu `data/social_tutor.db`; chỉ cần migration riêng nếu schema sẽ phát triển thêm. |
 | Kết nối Odoo | Có unit test dùng `FakeOdooClient` để kiểm tra mapping model/field. | Xác nhận model/field thật và chạy smoke test với Odoo staging/production có quyền đọc. |
-| Google Sheets | Có unit test kiểm tra mapping 13 cột và dòng trống; chưa gọi Google API thật. | Chia sẻ Sheet cho service account, điền hai biến Google và chạy một lead mẫu để kiểm tra quyền ghi. |
+| Google Sheets | Có unit test kiểm tra mapping 14 cột và dòng trống; chưa gọi Google API thật. | Thêm cột `Author URL` vào Sheet, chia sẻ cho service account, điền hai biến Google và chạy một lead mẫu để kiểm tra quyền ghi. |
 | Collector và pipeline | Có Mock collector, test keyword/classifier/extractor/pipeline và Browser/Graph collector không dùng mạng. | Test bằng dữ liệu post đã được phép sử dụng; chạy `--debug` để xác nhận Browser Connector đang lấy **post body**, không phải comment. |
 | Scheduler | APScheduler đã chạy theo `COLLECTION_INTERVAL_MINUTES`, đồng thời chạy ngay một lượt khi khởi động. | Chạy thử tiến trình dài hạn và giám sát lỗi/overlap theo nhu cầu vận hành. |
 | Logging | Log hiện in ra console; script debug Facebook có thể tạo artifact trong `logs/`. Chưa có `FileHandler` ghi log chạy ứng dụng vào `logs/` tự động. | Nếu cần log file tập trung, bổ sung `FileHandler`/rotating log và chính sách lưu giữ log. |

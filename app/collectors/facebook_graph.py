@@ -31,7 +31,7 @@ class FacebookGraphCollector(BaseCollector):
         if source.platform.lower() != "facebook":
             return []
         object_id = source.external_id or source.id
-        fields = "id,message,created_time,permalink_url"
+        fields = "id,message,created_time,permalink_url,from{id}"
         url = f"https://graph.facebook.com/{self.api_version}/{object_id}/feed?{urlencode({'fields': fields, 'limit': min(self.max_posts, 100)})}"
         posts: list[RawPost] = []
         while url and len(posts) < self.max_posts:
@@ -39,7 +39,9 @@ class FacebookGraphCollector(BaseCollector):
             for item in payload.get("data", []):
                 content = item.get("message", "").strip()
                 if content:
+                    author_id = str(item.get("from", {}).get("id") or "")
                     posts.append(RawPost(post_id=item["id"], source=source, content=content,
-                        posted_at=self._timestamp(item.get("created_time")), post_url=item.get("permalink_url")))
+                        posted_at=self._timestamp(item.get("created_time")), post_url=item.get("permalink_url"),
+                        author_url=f"https://www.facebook.com/{author_id}" if author_id else None))
             url = payload.get("paging", {}).get("next")
         return posts[:self.max_posts]

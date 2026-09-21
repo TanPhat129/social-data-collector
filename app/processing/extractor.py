@@ -15,5 +15,5 @@ class LeadExtractor:
         return TutorLead(post_id=post.post_id, collected_at=post.collected_at, posted_at=post.posted_at,
             platform=post.source.platform, group=post.source.name, subject=find(self.SUBJECT), grade=find(self.GRADE),
             location=find(self.LOCATION), mode="Online" if "online" in text else "Offline" if "offline" in text else None,
-            frequency=find(self.FREQUENCY), phone=find(self.PHONE), content=post.content, post_url=post.post_url, confidence=confidence)
-
+            frequency=find(self.FREQUENCY), phone=find(self.PHONE), content=post.content, post_url=post.post_url,
+            author_url=post.author_url, confidence=confidence)

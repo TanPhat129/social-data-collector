@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 class GoogleSheetsWriter:
     # Matches the header row in the configured Google Sheet:
     # STT, Group, Subject, Platform, Grade, Location, Mode, Budget, Phone,
-    # Content, URL, Posted At, Collected At.
-    HEADERS = ("STT", "Group", "Subject", "Platform", "Grade", "Location", "Mode", "Budget", "Phone", "Content", "URL", "Posted At", "Collected At")
+    # Content, URL, Author URL, Posted At, Collected At.
+    HEADERS = ("STT", "Group", "Subject", "Platform", "Grade", "Location", "Mode", "Budget", "Phone", "Content", "URL", "Author URL", "Posted At", "Collected At")
 
     def __init__(self, sheet_id: str | None = None, service_account_file: str | None = None):
         self.sheet_id, self.service_account_file = sheet_id, service_account_file
@@ -26,14 +26,14 @@ class GoogleSheetsWriter:
         first_row = self._first_empty_row(worksheet)
         rows = [self.to_row(lead, first_row + offset) for offset, lead in enumerate(leads)]
         last_row = first_row + len(rows) - 1
-        worksheet.update(f"A{first_row}:M{last_row}", rows, value_input_option="USER_ENTERED")
+        worksheet.update(f"A{first_row}:N{last_row}", rows, value_input_option="USER_ENTERED")
 
     @staticmethod
     def _first_empty_row(worksheet) -> int:
         """Find the first data row without lead fields, ignoring leftover STT formulas."""
         rows = worksheet.get_all_values()
         for row_number, row in enumerate(rows[1:], start=2):
-            fields = row[1:13]  # Group through Collected At; column A is STT.
+            fields = row[1:14]  # Group through Collected At; column A is STT.
             if not any(value.strip() for value in fields):
                 return row_number
         return max(2, len(rows) + 1)
@@ -53,6 +53,11 @@ class GoogleSheetsWriter:
             lead.phone or "",
             lead.content,
             lead.post_url or "",
-            lead.posted_at.isoformat() if lead.posted_at else "",
-            lead.collected_at.isoformat(),
+            lead.author_url or "",
+            GoogleSheetsWriter._format_datetime(lead.posted_at),
+            GoogleSheetsWriter._format_datetime(lead.collected_at),
         ]
+
+    @staticmethod
+    def _format_datetime(value) -> str:
+        return value.strftime("%Y-%m-%d %H:%M:%S") if value else ""

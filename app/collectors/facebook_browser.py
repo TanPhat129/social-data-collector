@@ -3,11 +3,13 @@
 It deliberately does not automate login, solve challenges, or evade platform
 controls. Create the persistent profile interactively outside this application.
 """
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 from pathlib import Path
-from urllib.parse import urlparse
+import re
+import unicodedata
+from urllib.parse import parse_qs, urlparse
 
 from app.collectors.base import BaseCollector
 from app.schemas import RawPost, Source
@@ -22,6 +24,17 @@ class FacebookBrowserCollector(BaseCollector):
         '[data-ad-rendering-role="story_message"]',
         '[data-testid="post_message"]',
     )
+    RELATIVE_TIME = re.compile(
+        r"(?<!\d)(?P<amount>\d+)\s*(?P<unit>phút|phut|minutes?|mins?|giờ|gio|hours?|hrs?|ngày|ngay|days?|h)(?!\w)",
+        re.IGNORECASE,
+    )
+    # Accent-folded before matching so labels such as "21 giờ" work regardless
+    # of the UI's Unicode normalization.
+    RELATIVE_TIME = re.compile(
+        r"(?<!\d)(?P<amount>\d+)\s*(?P<unit>phut|minutes?|mins?|gio|hours?|hrs?|ngay|days?|h)(?!\w)",
+        re.IGNORECASE,
+    )
+
     def __init__(self, profile_root: str, account_uid: str, *, headless: bool = True, max_posts: int = 30, max_scrolls: int = 2,
                  allowed_account_uids: set[str] | None = None):
         if not account_uid or not account_uid.isdecimal():
@@ -102,12 +115,17 @@ class FacebookBrowserCollector(BaseCollector):
                 continue
             links = article.locator("a").evaluate_all("links => links.map(link => link.href)")
             post_url = self._post_url(links)
+            author_url = None if self._is_anonymous_post(article, content) else self._author_url(self._header_links(article))
+            if author_url:
+                author_url = self._resolve_author_url(page, author_url)
             post_id = self._post_id(post_url, content)
             if post_id in seen_ids:
                 continue
             seen_ids.add(post_id)
+            collected_at = datetime.now().astimezone()
             posts.append(RawPost(post_id=post_id, source=source, content=content,
-                collected_at=datetime.now(), post_url=post_url))
+                collected_at=collected_at, posted_at=self._posted_at(article, collected_at, page), post_url=post_url,
+                author_url=author_url))
         return posts
 
     @staticmethod
@@ -126,6 +144,251 @@ class FacebookBrowserCollector(BaseCollector):
             if "story_fbid=" in url or "/permalink" in url:
                 return url
         return None
+
+    @staticmethod
+    def _author_url(links: list[str]) -> str | None:
+        """Return the first plausible Facebook profile link in post-header order."""
+        ignored_paths = {"groups", "posts", "permalink", "reel", "reels", "watch", "photo", "photos", "events", "marketplace"}
+        for url in links:
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or parsed.netloc.lower() not in {"facebook.com", "www.facebook.com", "m.facebook.com"}:
+                continue
+            if parsed.path == "/profile.php":
+                profile_id = parse_qs(parsed.query).get("id", [None])[0]
+                if profile_id and profile_id.isdecimal():
+                    return f"https://www.facebook.com/profile.php?id={profile_id}"
+                continue
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) == 4 and parts[0].lower() == "groups" and parts[2].lower() == "user" and parts[1].isdecimal() and parts[3].isdecimal():
+                # Facebook frequently exposes a group-member URL instead of a
+                # public profile URL. It is an authenticated, exact link to
+                # the post author and can be resolved in a separate tab.
+                return f"https://www.facebook.com/groups/{parts[1]}/user/{parts[3]}/"
+            if len(parts) == 1 and parts[0].lower() not in ignored_paths:
+                return f"https://www.facebook.com/{parts[0]}"
+        return None
+
+    def _header_links(self, article) -> list[str]:
+        """Return links in the header preceding a semantic post-message node.
+
+        Comment links occur after the post body. If Facebook does not expose a
+        reliable post-message node, return no author link rather than risk
+        attaching a commenter to an anonymous post.
+        """
+        try:
+            return article.evaluate(
+                """(root, selectors) => {
+                    const message = selectors.map(selector => root.querySelector(selector)).find(Boolean);
+                    if (!message) return [];
+                    return [...root.querySelectorAll('a[href]')]
+                        .filter(link => Boolean(link.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING))
+                        .map(link => link.href);
+                }""", list(self.POST_MESSAGE_SELECTORS), timeout=1_500
+            )
+        except Exception:
+            return []
+
+    @staticmethod
+    def _is_anonymous_text(text: str) -> bool:
+        folded = unicodedata.normalize("NFD", text).lower()
+        folded = "".join(char for char in folded if not unicodedata.combining(char))
+        return "nguoi tham gia an danh" in folded or "anonymous participant" in folded
+
+    def _is_anonymous_post(self, article, content: str) -> bool:
+        """Check only the post header, never text from comments."""
+        try:
+            header_text = article.evaluate(
+                """(root, body) => {
+                    const text = root.innerText || '';
+                    const index = text.indexOf(body);
+                    return index >= 0 ? text.slice(0, index) : '';
+                }""", content, timeout=1_500
+            )
+            return self._is_anonymous_text(header_text)
+        except Exception:
+            return False
+
+    def _resolve_author_url(self, page, author_url: str) -> str:
+        """Open a non-anonymous author destination in a temporary tab.
+
+        Group-member links are what Facebook currently renders for many group
+        posts. Visiting the destination is equivalent to opening its avatar,
+        but avoids coordinate-based clicking that could hit a group or comment
+        avatar. If Facebook does not redirect to a public profile, retain the
+        exact group-member URL because it still opens that member for the
+        authenticated account.
+        """
+        if "/groups/" not in author_url or "/user/" not in author_url:
+            return author_url
+        detail_page = page.context.new_page()
+        try:
+            detail_page.goto(author_url, wait_until="domcontentloaded", timeout=20_000)
+            resolved = self._author_url([detail_page.url])
+            return resolved or author_url
+        except Exception as exc:
+            logger.debug("author_url=%s resolution_failed=%s", author_url, type(exc).__name__)
+            return author_url
+        finally:
+            detail_page.close()
+
+    @staticmethod
+    def _posted_at(article, observed_at: datetime | None = None) -> datetime | None:
+        """Read a timestamp belonging to the post card, never a comment.
+
+        Modern Facebook can expose an epoch value, an ISO ``datetime`` value,
+        or only a human-readable relative label. We use only the first two;
+        guessing from labels such as ``2 giờ`` risks an incorrect date.
+        """
+        try:
+            values = article.evaluate(
+                """root => {
+                    const isCommentRoot = root.getAttribute('role') === 'article';
+                    const belongsToPost = node => {
+                        const comment = node.closest('[role="article"]');
+                        return isCommentRoot ? comment === root : !comment;
+                    };
+                    const own = selector => [...root.querySelectorAll(selector)]
+                        .filter(belongsToPost);
+                    const epoch = own('abbr[data-utime], [data-utime]')
+                        .map(node => node.getAttribute('data-utime')).filter(Boolean);
+                    if (epoch.length) return epoch;
+                    const iso = own('time[datetime]')
+                        .map(node => node.getAttribute('datetime')).filter(Boolean);
+                    if (iso.length) return iso;
+                    const relative = own('a[href*="/posts/"], a[href*="story_fbid="], a[href*="/permalink"]')
+                        .map(node => node.innerText || node.getAttribute('aria-label') || '')
+                        .filter(Boolean);
+                    return relative.map(value => `relative:${value}`);
+                }""", timeout=1_500
+            )
+        except Exception:
+            return None
+        observed_at = observed_at or datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        for value in values:
+            try:
+                if str(value).startswith("relative:"):
+                    relative_text = unicodedata.normalize("NFD", str(value)[len("relative:"):])
+                    relative_text = "".join(char for char in relative_text if not unicodedata.combining(char))
+                    relative_match = FacebookBrowserCollector.RELATIVE_TIME.search(relative_text)
+                    if not relative_match:
+                        continue
+                    amount = int(relative_match.group("amount"))
+                    unit = relative_match.group("unit").lower()
+                    seconds = amount * (60 if unit in {"phút", "phut", "minute", "minutes", "min", "mins"}
+                                        else 3_600 if unit in {"giờ", "gio", "hour", "hours", "hr", "hrs", "h"}
+                                        else 86_400)
+                    return observed_at - timedelta(seconds=seconds)
+                if str(value).strip().lstrip("-").isdigit():
+                    epoch = int(value)
+                    if epoch > 10_000_000_000:
+                        epoch //= 1000
+                    return datetime.fromtimestamp(epoch, tz=observed_at.tzinfo)
+                timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    return timestamp.replace(tzinfo=observed_at.tzinfo)
+                return timestamp.astimezone(observed_at.tzinfo)
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return None
+
+    @staticmethod
+    def _posted_at(article, observed_at: datetime | None = None, page=None) -> datetime | None:
+        """Get a post timestamp from metadata or Facebook's hover tooltip.
+
+        The time link in newer group cards often has a query-only ``href`` and
+        an empty text node until it is hovered. It appears immediately after
+        the author header link. Comments are excluded before considering any
+        timestamp candidate.
+        """
+        try:
+            metadata = article.evaluate(
+                """root => {
+                    const isCommentRoot = root.getAttribute('role') === 'article';
+                    const belongsToPost = node => {
+                        const comment = node.closest('[role="article"]');
+                        return isCommentRoot ? comment === root : !comment;
+                    };
+                    const anchors = [...root.querySelectorAll('a')];
+                    const ownAnchors = anchors.map((node, index) => ({node, index}))
+                        .filter(item => belongsToPost(item.node));
+                    const own = selector => [...root.querySelectorAll(selector)].filter(belongsToPost);
+                    const values = [
+                        ...own('abbr[data-utime], [data-utime]').map(node => node.getAttribute('data-utime')),
+                        ...own('time[datetime]').map(node => node.getAttribute('datetime')),
+                        ...ownAnchors.map(item => item.node.getAttribute('aria-label') || item.node.getAttribute('data-tooltip-content')),
+                        ...ownAnchors.map(item => {
+                            const text = (item.node.innerText || '').trim();
+                            return text ? `relative:${text}` : null;
+                        }),
+                    ].filter(Boolean);
+                    const authorPosition = ownAnchors.findIndex(item =>
+                        /\/groups\/[^/]+\/user\/\d+/.test(item.node.href || '') ||
+                        /\/profile\.php\?id=\d+/.test(item.node.href || '')
+                    );
+                    const timestamp = ownAnchors.find(item => {
+                        const href = item.node.getAttribute('href') || '';
+                        return item.index > (authorPosition >= 0 ? ownAnchors[authorPosition].index : -1) &&
+                            (/^[?#]/.test(href) || /\/posts\/|story_fbid=|permalink/.test(href));
+                    });
+                    return {values, hoverIndex: timestamp ? timestamp.index : null};
+                }""", timeout=1_500
+            )
+        except Exception:
+            return None
+
+        if not isinstance(metadata, dict):
+            metadata = {"values": metadata, "hoverIndex": None}
+        observed_at = observed_at or datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+
+        def parse(values) -> datetime | None:
+            for value in values:
+                raw = str(value).strip()
+                absolute = re.search(r"(?P<day>\d{1,2})\D+(?P<month>\d{1,2}),\s*(?P<year>\d{4})\D+(?P<hour>\d{1,2}):(?P<minute>\d{2})", raw)
+                if absolute:
+                    try:
+                        return datetime(
+                            int(absolute.group("year")), int(absolute.group("month")), int(absolute.group("day")),
+                            int(absolute.group("hour")), int(absolute.group("minute")), tzinfo=observed_at.tzinfo,
+                        )
+                    except ValueError:
+                        continue
+                try:
+                    if raw.lstrip("-").isdigit():
+                        epoch = int(raw)
+                        return datetime.fromtimestamp(epoch // 1000 if epoch > 10_000_000_000 else epoch, tz=observed_at.tzinfo)
+                    if raw.startswith("relative:"):
+                        folded = unicodedata.normalize("NFD", raw[len("relative:"):])
+                        folded = "".join(char for char in folded if not unicodedata.combining(char))
+                        relative = FacebookBrowserCollector.RELATIVE_TIME.search(folded)
+                        if not relative:
+                            continue
+                        amount, unit = int(relative.group("amount")), relative.group("unit").lower()
+                        seconds = amount * (60 if unit in {"phut", "minute", "minutes", "min", "mins"}
+                                            else 3_600 if unit in {"gio", "hour", "hours", "hr", "hrs", "h"}
+                                            else 86_400)
+                        return observed_at - timedelta(seconds=seconds)
+                    timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    return timestamp.replace(tzinfo=observed_at.tzinfo) if timestamp.tzinfo is None else timestamp.astimezone(observed_at.tzinfo)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            return None
+
+        posted_at = parse(metadata.get("values", []))
+        if posted_at or page is None or metadata.get("hoverIndex") is None:
+            return posted_at
+        try:
+            timestamp_link = article.locator("a").nth(metadata["hoverIndex"])
+            timestamp_link.hover(timeout=1_500)
+            page.wait_for_timeout(300)
+            tooltip_values = page.locator('[role="tooltip"]').all_inner_texts()
+            tooltip_values.extend(timestamp_link.evaluate("node => [node.getAttribute('aria-label'), node.getAttribute('data-tooltip-content'), node.innerText]"))
+            return parse(tooltip_values)
+        except Exception:
+            return None
 
     def _post_message(self, article) -> str | None:
         """Return only Facebook's post-message nodes, never article-wide text.

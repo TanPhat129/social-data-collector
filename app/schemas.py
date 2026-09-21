@@ -17,6 +17,7 @@ class RawPost(BaseModel):
     content: str
     posted_at: datetime | None = None
     post_url: str | None = None
+    author_url: str | None = None
     collected_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -36,4 +37,5 @@ class TutorLead(BaseModel):
     phone: str | None = None
     content: str
     post_url: str | None = None
+    author_url: str | None = None
     confidence: float = Field(ge=0, le=1)
