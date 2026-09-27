@@ -6,6 +6,16 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     app_env: str = "development"
     database_url: str = "sqlite:///./data/social_tutor.db"
+    postgres_dsn: str | None = None
+    account_pools_path: str = "config/account_pools.yaml"
+    group_discovery_path: str = "config/group_discovery.yaml"
+    post_search_path: str = "config/post_search.yaml"
+    orchestrator_enabled: bool = False
+    orchestrator_pool_id: str | None = None
+    max_concurrent_accounts: int = 10
+    shard_pause_seconds: int = 45
+    account_shard_timeout_seconds: int = 900
+    sheet_outbox_batch_size: int = 50
     keywords_path: str = "config/keywords.yaml"
     timezone: str = "Asia/Ho_Chi_Minh"
     odoo_url: str | None = None

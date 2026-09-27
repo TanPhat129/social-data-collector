@@ -1,0 +1,9 @@
+# This workflow only discovers candidate groups. It never changes
+# account_pools.yaml or schedules a lead crawl without operator approval.
+group_discovery:
+  enabled: true
+  queries:
+    - "gia sư tphcm"
+    - "phụ huynh tìm gia sư"
+  max_results_per_query: 30
+  account_ids: [fb_001]

@@ -303,12 +303,14 @@ git add README.md app/ tests/
 git commit -m "Mô tả ngắn gọn thay đổi"
 ```
 
-Đẩy commit lên nhánh `main`:
+Tạo nhánh riêng và đẩy lên để review (không push trực tiếp vào `main`):
 
 ```powershell
-git push origin main
+git switch -c feature/<mo-ta-ngan>
+git push -u origin feature/<mo-ta-ngan>
 ```
-### $\color{red}{\text{Lưu ý không tự push code vào nhánh main, hãy tạo một branch riêng rồi push code để doublecheck.}}$ Trước khi bắt đầu một thay đổi mới, lấy cập nhật mới nhất để tránh xung đột:
+
+Trước khi bắt đầu một thay đổi mới, lấy cập nhật mới nhất để tránh xung đột:
 
 ```powershell
 git pull --rebase origin main
@@ -342,3 +344,279 @@ lead; các file này đã được `.gitignore` loại trừ.
    trên môi trường được phép.
 6. Bật `--schedule` sau khi Browser Connector và Google Sheets đã được xác nhận
    hoạt động; bổ sung file logging nếu cần theo dõi dài hạn.
+
+## Điều phối nhiều account tập trung (PostgreSQL)
+
+Chỉ chuyển sang chế độ này sau khi luồng Browser Connector một account đã ổn
+định. Chế độ mới thay SQLite chống trùng cục bộ bằng PostgreSQL dùng chung và
+đưa Google Sheets vào outbox, không để browser worker ghi Sheet trực tiếp.
+
+```text
+account pool YAML -> shard barrier -> một browser worker / account
+                                      -> PostgreSQL claim bài viết duy nhất
+                                      -> transaction lead + sheet_outbox
+                                      -> một Google Sheets writer tuần tự
+```
+
+Nguồn cấu hình do vận hành quản trị:
+
+- `config/account_pools.yaml`: pool, account, đường dẫn profile, group được
+  phép đọc và assignment group/account/shard. Copy từ
+  `config/account_pools.example.yaml`; không commit file đã điền.
+- PostgreSQL: trạng thái động account (`AVAILABLE`, `IN_USE`,
+  `NEEDS_MANUAL_ACTION`, `DISABLED`), chống trùng toàn hệ thống, lead và
+  `sheet_outbox`. Đồng bộ YAML không ghi đè trạng thái đang vận hành.
+
+Với pilot 10 account × 50 group, gán 10 group/account cho mỗi shard `1` đến
+`5`. Một round chạy song song các account ở shard 1, đợi toàn bộ shard kết
+thúc/timeout, nghỉ 30–60 giây rồi sang shard 2. Không dùng scheduler khoảng
+thời gian cố định nên không tạo lượt chạy chồng nhau. `max_concurrent_accounts`
+giới hạn số account đồng thời trong mỗi shard.
+
+### Khởi tạo và chạy một central round
+
+```powershell
+Copy-Item config/account_pools.example.yaml config/account_pools.yaml
+# Chỉ khai báo profile/group mà đúng account có quyền xem.
+python -m scripts.init_postgres
+python -m app.main --orchestrate --pool pilot_hcm --debug
+```
+
+Thiết lập `.env` trước khi chạy:
+
+```dotenv
+POSTGRES_DSN=postgresql://<user>:<password>@<host>:5432/<database>
+ACCOUNT_POOLS_PATH=config/account_pools.yaml
+GOOGLE_SHEET_ID=<sheet_id>
+GOOGLE_SERVICE_ACCOUNT_FILE=.secrets/google-service-account.json
+SHEET_OUTBOX_BATCH_SIZE=50
+```
+
+`POSTGRES_DSN`, Google Sheet và profile browser khớp với từng account được bật
+là bắt buộc trong chế độ này. `canonical_post_url` là bắt buộc trước khi claim;
+`author_url` là tùy chọn và để trống cho bài ẩn danh. Khi hai account thấy cùng
+một bài, PostgreSQL chỉ nhận claim đầu tiên theo
+`(platform, canonical_post_url)`, vì vậy outbox chỉ tạo một dòng Sheet.
+
+- `AVAILABLE`: có thể được phân công; shard đổi trạng thái atomically sang
+  `IN_USE`.
+- `IN_USE`: đang bị một worker khóa, không được worker khác sử dụng.
+- `NEEDS_MANUAL_ACTION`: cần người vận hành kiểm tra login/checkpoint/quyền
+  xem/lỗi worker; scheduler không tự dùng lại.
+- `DISABLED`: người vận hành chủ động loại khỏi lịch chạy.
+
+Lệnh trên chạy đúng một round hoàn chỉnh. Dùng supervisor bên ngoài để gọi
+round tiếp theo sau khi tiến trình thoát và đã qua cooldown mong muốn; như vậy
+vẫn giữ shard barrier và không mở trùng browser profile.
+
+`pool` là chi tiết nội bộ và không hiện trong menu khi account discovery chỉ
+thuộc một pool. `max_concurrent_accounts: 5` nghĩa là nếu có 10 account, hệ
+thống chạy 5 account đầu, chờ hoàn tất, rồi chạy 5 account còn lại trong cùng
+shard. Không có chọn account ngẫu nhiên: mọi account có assignment đều chạy
+trước khi chuyển sang shard kế tiếp.
+
+## Hướng dẫn vận hành cho người dùng
+
+Phần này mô tả các thao tác thường dùng. Có ba workflow riêng; chúng không thay
+đổi hoặc tự kích hoạt lẫn nhau.
+
+```text
+1. Crawl group đã duyệt       -> tạo lead
+2. Tìm group nguồn theo query -> chỉ tạo group ứng viên
+3. Facebook Search post       -> nguồn mở rộng, triển khai sau
+```
+
+### Chuẩn bị lần đầu
+
+1. Đăng nhập thủ công một lần cho mỗi UID bằng `python -m scripts.login_facebook`.
+   Mỗi UID phải có profile riêng tại `.secrets/facebook-profiles/<uid>`.
+2. Cấu hình `POSTGRES_DSN`, Google Sheets và các biến multi-account trong `.env`.
+3. Khai báo account và các group đã được duyệt trong `config/account_pools.yaml`.
+4. Đồng bộ cấu hình và schema trước lần chạy đầu, hoặc sau mỗi lần nâng cấp schema:
+
+```powershell
+python -m scripts.init_postgres
+```
+
+### Menu tương tác
+
+Mở menu cho người vận hành:
+
+```powershell
+python -m app.main --interactive
+```
+
+Menu hiện hỗ trợ:
+
+```text
+1. Crawl group — một account tìm group, tự gán các account có quyền xem
+2. Crawl post — từ group đã duyệt, tìm bài theo keyword
+3. Tìm post Facebook theo keyword
+0. Thoát
+```
+
+Menu luôn yêu cầu xác nhận trước khi mở browser. Không in password, cookie,
+token hoặc PostgreSQL DSN ra màn hình.
+
+### Workflow 1 — Crawl group: tìm, xét điều kiện và gán account
+
+Chọn mục `1` và một account discovery. Hệ thống tự xác định pool duy nhất của
+account đó, tìm danh sách group theo `group_discovery.yaml`, rồi kiểm tra từng
+group bằng **mọi account trong pool**. Group `PENDING` chỉ được duyệt một lần,
+rồi được gán cho từng account thật sự thấy feed/post. Shard cũng tự chọn: hệ
+thống ưu tiên shard còn dưới 10 group của mỗi account, hoặc tạo shard kế tiếp
+khi các shard hiện có đã đầy. Kết quả nêu số group duyệt, assignment đã thêm,
+không truy cập được và lỗi; audit log nằm ở `group_candidate_events`.
+
+### Workflow 2 — Crawl post từ group đã duyệt
+
+Chỉ các group đã có trong `config/account_pools.yaml` mới được crawl. Một group
+được gán đúng account có quyền xem; account khác không tự dùng profile đó.
+
+Chạy từ menu, hoặc dùng lệnh cho vận hành tự động:
+
+```powershell
+python -m app.main --orchestrate --pool pilot_hcm --debug
+```
+
+Menu không hỏi pool: nếu có một pool, nó tự chạy pool đó; nếu có nhiều pool,
+hệ thống chạy từng pool tuần tự để tránh hai workflow ghi Google Sheets cùng lúc.
+
+Để test nhanh mà không quét hết group, menu mục `2` mặc định chọn **Test
+nhanh**: chỉ chạy shard đầu tiên và tối đa 5 group tổng cộng, phân đều luân
+phiên giữa các account (với 2 account thường là 3 group + 2 group). Lệnh tương
+đương:
+
+```powershell
+python -m app.main --orchestrate --pool pilot_hcm --shard 1 --max-sources-total 5 --debug
+```
+
+Chỉ dùng chế độ này để kiểm tra profile, collector, PostgreSQL và Google
+Sheets; chọn **Quét toàn bộ** trong menu hoặc bỏ hai tham số trên khi vận hành
+thực tế.
+
+Chế độ menu `3=Chạy liên tục` thực hiện đầy đủ shard 1 đến shard cuối, flush
+Google Sheets sau từng shard, nghỉ 30–60 giây sau shard cuối rồi quay lại shard
+1. Dừng bằng `Ctrl+C`. Lệnh tương đương cho vận hành tự động:
+
+```powershell
+python -m app.main --orchestrate --pool pilot_hcm --continuous --debug
+```
+
+Kết quả đi qua: bài gốc có URL → lọc keyword → phân loại → trích xuất →
+PostgreSQL chống trùng → Sheet outbox. Comment/reply, bài thiếu URL và lead
+trùng không được xuất Google Sheets.
+
+### Cấu hình tìm group nguồn theo keyword
+
+File `config/group_discovery.yaml` là cấu hình discovery, hoàn toàn tách khỏi
+`config/keywords.yaml` và `account_pools.yaml`.
+
+```yaml
+group_discovery:
+  enabled: true
+  queries:
+    - "gia sư tphcm"
+    - "phụ huynh tìm gia sư"
+  max_results_per_query: 30
+  account_ids: [fb_001]
+```
+
+Chạy từ menu, hoặc dùng lệnh:
+
+```powershell
+python -m app.main --discover-groups --account fb_001 --debug
+```
+
+Khi chạy bằng menu mục `1`, discovery dùng **một account** để tìm candidate,
+lưu vào PostgreSQL `group_candidates`, rồi kiểm tra từng candidate bằng các
+account trong cùng pool. Group đạt điều kiện truy cập sẽ được tự động duyệt,
+gán cho đúng account có thể xem và đặt vào shard còn chỗ trong
+`account_pools.yaml`. Candidate không truy cập được hoặc lỗi không vào lịch
+crawl. Lệnh `--discover-groups` chỉ làm bước tìm candidate, không tự gán.
+
+Discovery lưu candidate gồm URL, tên, privacy, số thành viên, tần suất post
+(nếu Facebook hiển thị), query và account tìm thấy. Candidate không truy cập
+được, đã duyệt hoặc gặp lỗi không được thêm vào lịch crawl. Mọi lần kiểm tra,
+tự gán và lỗi đều được lưu trong PostgreSQL `group_candidate_events` để truy
+vết sau này.
+
+### Workflow 3 — Tìm post Facebook theo keyword
+
+Workflow này hoàn toàn độc lập với group discovery và `account_pools.yaml`
+assignment: account mở Facebook Search theo query, chỉ xử lý post gốc mà account
+nhìn thấy, rồi dùng chung keyword filter, classifier, PostgreSQL deduplication
+và Sheet outbox. Nó không thêm hoặc xóa group nguồn.
+
+Chỉnh query tại `config/post_search.yaml`:
+
+```yaml
+facebook_post_search:
+  enabled: true
+  queries:
+    - "cần gia sư"
+    - "tìm gia sư"
+  max_posts_per_query: 20
+  account_ids: [fb_001]
+```
+
+Chạy từ menu mục `3`, hoặc:
+
+```powershell
+python -m app.main --search-posts --account fb_001 --debug
+```
+
+Chỉ dùng query ngắn, đã được vận hành xem xét; `keywords.yaml` vẫn là lớp lọc
+lead phía sau và không tự biến mọi keyword thành truy vấn Facebook Search.
+
+Post chứa keyword nhưng mang dấu hiệu chào bán dịch vụ như `nhận học sinh`,
+`học thử`, `khóa học`, `chiêu sinh`, `bên em có gia sư` hoặc giá quảng cáo được
+phân loại `TUTOR_OFFER` và bị loại. Ví dụ “Bạn đang tìm gia sư… nhận học sinh,
+chỉ 600k/tháng, học thử miễn phí” không tạo lead vì người đăng đang bán dịch vụ,
+không phải đang tìm người dạy.
+
+### Quy tắc chạy tuần tự Google Sheets
+
+Crawl group (menu `2`) và Facebook Post Search (menu `3`) cùng dùng một Sheet
+và một `sheet_outbox`. Trong phiên bản hiện tại, **không chạy hai workflow này
+ở hai terminal cùng lúc**: hoàn tất workflow thứ nhất rồi mới chạy workflow
+thứ hai. Mỗi workflow vẫn có thể xử lý nhiều account theo batch nội bộ, giới
+hạn bởi `max_concurrent_accounts`; quy tắc này chỉ cấm chạy song song hai
+workflow độc lập cùng ghi Google Sheets.
+
+Sau khi mỗi shard hoàn tất, hệ thống flush lead `PENDING` từ `sheet_outbox`
+sang Google Sheets **trước** khi bắt đầu nghỉ 30–60 giây. Nếu Sheets tạm lỗi,
+outbox chuyển sang `RETRY`; crawl shard tiếp theo vẫn tiếp tục và lần flush sau
+sẽ thử lại.
+
+Khi cần dừng, nhấn `Ctrl+C` và chờ thông báo dừng an toàn; không đóng cưỡng bức
+terminal. Lead đã commit trước thời điểm dừng được giữ trong PostgreSQL và hệ
+thống flush `sheet_outbox` trước khi thoát. Nếu máy/terminal bị tắt cưỡng bức,
+lead vẫn nằm trong outbox `PENDING` và sẽ được xuất ở lần chạy hoàn tất kế tiếp.
+
+### Khi xảy ra lỗi account
+
+- `AVAILABLE`: có thể chạy.
+- `IN_USE`: đang có worker sử dụng; không mở thêm browser cùng profile.
+- `NEEDS_MANUAL_ACTION`: đăng nhập lại hoặc kiểm tra checkpoint/quyền group.
+- `DISABLED`: tạm ngưng theo quyết định vận hành.
+
+Không xóa profile để xử lý lỗi session. Đăng nhập lại đúng UID để cập nhật
+session trong thư mục profile hiện có.
+
+Nếu log báo tất cả shard là `SKIPPED`, kiểm tra trạng thái trước:
+
+```powershell
+python -m app.main --account-status
+```
+
+`IN_USE` còn sót lại sau khi terminal bị đóng hoặc dừng giữa một lượt có thể
+được mở khóa **chỉ khi đã tắt tất cả terminal crawler**:
+
+```powershell
+python -m app.main --recover-in-use-accounts
+```
+
+Hoặc chọn mục `4. Check / recover account status` trong menu. Không reset
+`NEEDS_MANUAL_ACTION` tự động: mở profile của UID tương ứng, xử lý login,
+checkpoint hoặc quyền truy cập trước, rồi chuyển trạng thái về `AVAILABLE`.

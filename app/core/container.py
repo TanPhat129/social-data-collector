@@ -12,6 +12,11 @@ from app.processing.extractor import LeadExtractor
 from app.source_config import YamlSourceService
 from app.use_cases.process_leads import ProcessLeads
 from app.use_cases.sync_config import SyncConfig
+from app.orchestration.orchestrator import ShardOrchestrator
+from app.orchestration.runtime import CentralCrawlRuntime
+from app.orchestration.workers import BrowserAccountShardWorker, GoogleSheetsOutboxWorker
+from app.orchestration.yaml_config import YamlOrchestrationConfig
+from app.database.postgres_coordinator import PostgresCoordinator
 
 
 class Container:
@@ -25,15 +30,19 @@ class Container:
                 raise ValueError("Production requires AI_PROVIDER=openai")
             if not all((settings.odoo_url, settings.odoo_db, settings.odoo_username, settings.odoo_password)):
                 raise ValueError("Production requires complete Odoo configuration")
-        collector = self._collector()
-        classifier, extractor = self._ai_components()
-        self.pipeline = LeadPipeline(
-            collector,
-            KeywordFilter.from_yaml(settings.keywords_path),
-            ProcessedPostStore(settings.database_url),
-            GoogleSheetsWriter(settings.google_sheet_id, settings.google_service_account_file),
-            classifier=classifier, extractor=extractor,
-        )
+        self.pipeline: LeadPipeline | None = None
+
+    def _legacy_pipeline(self) -> LeadPipeline:
+        if self.pipeline is None:
+            classifier, extractor = self._ai_components()
+            self.pipeline = LeadPipeline(
+                self._collector(),
+                KeywordFilter.from_yaml(self.settings.keywords_path),
+                ProcessedPostStore(self.settings.database_url),
+                GoogleSheetsWriter(self.settings.google_sheet_id, self.settings.google_service_account_file),
+                classifier=classifier, extractor=extractor,
+            )
+        return self.pipeline
 
     def _collector(self):
         if self.settings.collector_provider == "mock":
@@ -61,7 +70,7 @@ class Container:
         raise ValueError(f"Unsupported AI_PROVIDER: {self.settings.ai_provider}")
 
     def process_leads(self) -> ProcessLeads:
-        return ProcessLeads(self.pipeline)
+        return ProcessLeads(self._legacy_pipeline())
 
     def sync_config(self) -> SyncConfig | None:
         required = (self.settings.odoo_url, self.settings.odoo_db, self.settings.odoo_username, self.settings.odoo_password)
@@ -71,3 +80,24 @@ class Container:
         return SyncConfig(SourceService(client, self.settings.odoo_source_model,
             name_field=self.settings.odoo_source_name_field, platform_field=self.settings.odoo_source_platform_field,
             external_id_field=self.settings.odoo_source_external_id_field, enabled_field=self.settings.odoo_source_enabled_field))
+
+    def central_runtime(self) -> CentralCrawlRuntime:
+        """Wire the multi-account path; the legacy SQLite pipeline remains separate."""
+        if not self.settings.postgres_dsn:
+            raise ValueError("POSTGRES_DSN is required for multi-account orchestration")
+        coordinator = PostgresCoordinator(self.settings.postgres_dsn)
+        config = YamlOrchestrationConfig(self.settings.account_pools_path)
+        classifier, extractor = self._ai_components()
+        account_worker = BrowserAccountShardWorker(
+            coordinator, KeywordFilter.from_yaml(self.settings.keywords_path),
+            headless=self.settings.facebook_browser_headless,
+            max_posts=self.settings.facebook_max_posts_per_source,
+            max_scrolls=self.settings.facebook_browser_max_scrolls,
+            classifier=classifier, extractor=extractor,
+        )
+        sheets_worker = GoogleSheetsOutboxWorker(
+            coordinator,
+            GoogleSheetsWriter(self.settings.google_sheet_id, self.settings.google_service_account_file),
+            self.settings.sheet_outbox_batch_size,
+        )
+        return CentralCrawlRuntime(ShardOrchestrator(config, coordinator, account_worker), sheets_worker)

@@ -1,0 +1,19 @@
+# Copy this file to config/account_pools.yaml, then replace placeholders with
+# your locally logged-in Facebook accounts and approved group assignments.
+shard_pause_seconds: 45
+account_shard_timeout_seconds: 900
+
+accounts:
+  - id: fb_001
+    facebook_uid: "<facebook_numeric_uid>"
+    profile_path: .secrets/facebook-profiles/<facebook_numeric_uid>
+    status: AVAILABLE
+    enabled: true
+
+pools:
+  - id: default_pool
+    account_ids: [fb_001]
+    max_concurrent_accounts: 1
+
+sources: []
+assignments: []

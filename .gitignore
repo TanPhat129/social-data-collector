@@ -8,5 +8,10 @@ logs/
 *.db
 service-account*.json
 secrets/
-*.json
 /output*.xlsx
+google-service-account*.json
+config/account_pools.yaml
+config/*.bak
+/.pytest_cache/
+/.pytest-*/
+/pytest-cache-files-*/

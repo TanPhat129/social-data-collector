@@ -20,7 +20,7 @@ class OpenAITutorAnalyzer:
     SCHEMA = {
         "type": "object", "additionalProperties": False,
         "properties": {
-            "intent": {"type": "string", "enum": ["FIND_TUTOR", "OTHER"]},
+            "intent": {"type": "string", "enum": ["FIND_TUTOR", "TUTOR_OFFER", "OTHER", "UNCERTAIN"]},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             **{field: {"type": ["string", "null"]} for field in ("subject", "grade", "location", "mode", "schedule", "frequency", "budget", "phone")},
         },
@@ -37,7 +37,7 @@ class OpenAITutorAnalyzer:
         for attempt in range(self.max_retries):
             try:
                 response = self.client.responses.create(model=self.model, store=False,
-                    instructions="Classify Vietnamese social posts. FIND_TUTOR only means a person is seeking to hire a tutor. Extract only explicit facts; otherwise use null.",
+                    instructions="Classify Vietnamese social posts. FIND_TUTOR only means a person is seeking to hire a tutor. Posts advertising tutoring, enrolling students, courses, fees, or a tutor's services are TUTOR_OFFER, never FIND_TUTOR. Extract only explicit facts; otherwise use null.",
                     input=content, text={"format": {"type": "json_schema", "name": "tutor_lead", "schema": self.SCHEMA, "strict": True}})
                 data = json.loads(response.output_text)
                 result = TutorAnalysis(data["intent"], float(data["confidence"]), {key: data[key] for key in self.SCHEMA["required"][2:]})
